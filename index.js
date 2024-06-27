@@ -4,21 +4,50 @@ const sqlite3 = require("sqlite3").verbose();
 const bcrypt = require("bcrypt");
 const swaggerUi = require("swagger-ui-express");
 const swaggerSpec = require("./swaggerConfig");
+const bodyParser = require("body-parser");
 const app = express();
 const port = 3000;
 // Configurar CORS
 app.use(cors());
+// Configurar body-parser para manejar solicitudes más grandes
+app.use(bodyParser.json({ limit: "10mb" }));
+app.use(bodyParser.urlencoded({ limit: "10mb", extended: true }));
 // Conectar a la base de datos SQLite
 const db = new sqlite3.Database("mi-base-de-datos.db");
 
 // Crear tablas (dueños y citas)
 db.serialize(() => {
+  db.run("ALTER TABLE users ADD COLUMN profile_image TEXT", [], function (err) {
+    if (err) {
+      if (err.message.includes("duplicate column name")) {
+        console.log("La columna profile_image ya existe en la tabla users.");
+      } else {
+        console.error(err.message);
+      }
+    }
+  });
+
+  db.run(
+    "ALTER TABLE owners ADD COLUMN profile_image TEXT",
+    [],
+    function (err) {
+      if (err) {
+        if (err.message.includes("duplicate column name")) {
+          console.log("La columna profile_image ya existe en la tabla owners.");
+        } else {
+          console.error(err.message);
+        }
+      }
+    }
+  );
+});
+db.serialize(() => {
   // Incluye aquí los comandos CREATE TABLE para cada una de tus tablas
   db.run(
-    "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, phone_number TEXT, password TEXT, client_name TEXT)"
+    "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, phone_number TEXT, password TEXT, client_name TEXT, profile_image TEXT)"
   );
   db.run(
-    "CREATE TABLE IF NOT EXISTS owners (id INTEGER PRIMARY KEY, phone_number TEXT, password TEXT, client_name TEXT)"
+    "CREATE TABLE IF NOT EXISTS owners (id INTEGER PRIMARY KEY, phone_number TEXT, password TEXT, client_name TEXT, profile_image TEXT)"
   );
   db.run(
     "CREATE TABLE IF NOT EXISTS businesses (id INTEGER PRIMARY KEY, owner_id INTEGER, name TEXT, location TEXT, contact_number TEXT)"
@@ -94,9 +123,11 @@ const hashPasswordMiddleware = async (req, res, next) => {
  *             example:
  *               error: "Error interno del servidor"
  */
+// Endpoint de registro
 app.post("/register", hashPasswordMiddleware, (req, res) => {
-  const { phone_number, password, is_owner, client_name } = req.body;
-  console.log("entrandoendpoint", req.body);
+  const { phone_number, password, is_owner, client_name, profile_image } =
+    req.body;
+
   if (
     !phone_number ||
     !password ||
@@ -108,24 +139,46 @@ app.post("/register", hashPasswordMiddleware, (req, res) => {
 
   const tableName = is_owner ? "owners" : "users";
 
-  // Agregar el usuario a la base de datos
-  const sql = is_owner
-    ? `INSERT INTO ${tableName} (phone_number, password) VALUES (?, ?)`
-    : `INSERT INTO ${tableName} (phone_number, password, client_name) VALUES (?, ?, ?)`;
+  // Verificar si el phone_number ya existe
+  db.get(
+    `SELECT * FROM ${tableName} WHERE phone_number = ?`,
+    [phone_number],
+    (err, row) => {
+      if (err) {
+        console.error(err.message);
+        return res.status(500).json({ error: "Error interno del servidor" });
+      }
+      if (row) {
+        return res
+          .status(400)
+          .json({ error: "Usuario con ese num de tel ya existe" });
+      }
 
-  const params = is_owner
-    ? [phone_number, password]
-    : [phone_number, password, client_name];
-  db.run(sql, params, function (err) {
-    if (err) {
-      console.error(err.message);
-      return res.status(500).json({ error: "Error interno del servidor" });
+      // Agregar el usuario a la base de datos
+      const sql = is_owner
+        ? `INSERT INTO ${tableName} (phone_number, password, profile_image) VALUES (?, ?, ?)`
+        : `INSERT INTO ${tableName} (phone_number, password, client_name, profile_image) VALUES (?, ?, ?, ?)`;
+
+      const params = is_owner
+        ? [phone_number, password, profile_image]
+        : [phone_number, password, client_name, profile_image];
+
+      db.run(sql, params, function (err) {
+        if (err) {
+          console.error(err.message);
+          return res.status(500).json({ error: "Error interno del servidor" });
+        }
+        // Éxito al registrar el usuario
+        res.status(201).json({
+          id: this.lastID,
+          phone_number,
+          is_owner,
+          client_name,
+          profile_image,
+        });
+      });
     }
-    // Éxito al registrar el usuario
-    res
-      .status(201)
-      .json({ id: this.lastID, phone_number, is_owner, client_name });
-  });
+  );
 });
 
 /**
@@ -172,22 +225,40 @@ app.post("/register", hashPasswordMiddleware, (req, res) => {
  *               error: "Campos incompletos"
  */
 app.post("/login", async (req, res) => {
-  //3121892531
-  //marcos1
   const { phone_number, password } = req.body;
+  console.log("Datos recibidos:", { phone_number, password });
 
   if (!phone_number || !password) {
     return res.status(400).json({ error: "Campos incompletos" });
   }
 
-  // Verificar si el usuario es dueño o cliente
-  const ownerResult = await queryUser("owners", phone_number, password);
-  const userResult = await queryUser("users", phone_number, password);
+  try {
+    console.log("Consultando en la tabla owners");
+    const ownerResult = await queryUser("owners", phone_number, password);
+    console.log("Resultado owners:", ownerResult);
 
-  if (ownerResult || userResult) {
-    res.json({ success: true, is_owner: ownerResult ? true : false });
-  } else {
-    res.status(401).json({ error: "Credenciales inválidas" });
+    console.log("Consultando en la tabla users");
+    const userResult = await queryUser("users", phone_number, password);
+    console.log("Resultado users:", userResult);
+
+    if (ownerResult || userResult) {
+      const user = ownerResult || userResult;
+      console.log("Usuario encontrado:", user);
+      res.json({
+        success: true,
+        is_owner: !!ownerResult,
+        id: user.id,
+        phone_number: user.phone_number,
+        client_name: user.client_name,
+        profile_image: user.profile_image,
+      });
+    } else {
+      console.log("Credenciales inválidas");
+      res.status(401).json({ error: "Credenciales inválidas" });
+    }
+  } catch (error) {
+    console.error("Error en el servidor:", error);
+    res.status(500).json({ error: "Error interno del servidor" });
   }
 });
 // Endpoint para crear un negocio
@@ -331,21 +402,26 @@ app.get("/appointments/:clientId", (req, res) => {
 });
 
 // Función auxiliar para consultar un usuario en una tabla específica
-const queryUser = (tableName, phone_number, password) => {
+
+const queryUser = (table, phone_number, password) => {
+  console.log("TABLA A CONSULTAR", table);
   return new Promise((resolve, reject) => {
-    db.get(
-      `SELECT * FROM ${tableName} WHERE phone_number = ?`,
-      [phone_number],
-      (err, row) => {
-        if (err) {
-          reject(err);
-        } else if (row && bcrypt.compareSync(password, row.password)) {
-          resolve(row);
-        } else {
-          resolve(null);
-        }
+    const sql = `SELECT * FROM ${table} WHERE phone_number = ?`;
+    db.get(sql, [phone_number], async (err, row) => {
+      if (err) {
+        return reject(err);
       }
-    );
+      if (row) {
+        const match = await bcrypt.compare(password, row.password);
+        if (match) {
+          return resolve(row);
+        } else {
+          return resolve(null);
+        }
+      } else {
+        return resolve(null);
+      }
+    });
   });
 };
 // Middleware para parsear el cuerpo de las solicitudes como JSON
