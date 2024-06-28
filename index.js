@@ -5,6 +5,8 @@ const bcrypt = require("bcrypt");
 const swaggerUi = require("swagger-ui-express");
 const swaggerSpec = require("./swaggerConfig");
 const bodyParser = require("body-parser");
+const multer = require("multer");
+const path = require("path");
 const app = express();
 const port = 3000;
 // Configurar CORS
@@ -12,8 +14,21 @@ app.use(cors());
 // Configurar body-parser para manejar solicitudes más grandes
 app.use(bodyParser.json({ limit: "10mb" }));
 app.use(bodyParser.urlencoded({ limit: "10mb", extended: true }));
+// Configurar ruta para servir archivos estáticos
+app.use("/uploads", express.static("uploads"));
 // Conectar a la base de datos SQLite
 const db = new sqlite3.Database("mi-base-de-datos.db");
+// Configuración de Multer para almacenamiento
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, "uploads/"); // Carpeta donde se guardarán los archivos
+  },
+  filename: function (req, file, cb) {
+    cb(null, Date.now() + path.extname(file.originalname)); // Nombre único para cada archivo
+  },
+});
+
+const upload = multer({ storage: storage });
 
 // Crear tablas (dueños y citas)
 db.serialize(() => {
@@ -124,7 +139,7 @@ const hashPasswordMiddleware = async (req, res, next) => {
  *               error: "Error interno del servidor"
  */
 // Endpoint de registro
-app.post("/register", hashPasswordMiddleware, (req, res) => {
+/* app.post("/register", hashPasswordMiddleware, (req, res) => {
   const { phone_number, password, is_owner, client_name, profile_image } =
     req.body;
 
@@ -179,7 +194,91 @@ app.post("/register", hashPasswordMiddleware, (req, res) => {
       });
     }
   );
-});
+}); */
+
+app.post(
+  "/register",
+  upload.single("profile_image"),
+  hashPasswordMiddleware,
+  (req, res) => {
+    const { phone_number, password, client_name } = req.body;
+    let { is_owner } = req.body;
+    const profile_image = req.file ? req.file.filename : null;
+
+    console.log("Datos recibidos:", {
+      phone_number,
+      password,
+      is_owner,
+      client_name,
+      profile_image,
+    });
+
+    // Convertir is_owner a booleano
+    is_owner = is_owner === "true" || is_owner === true;
+
+    if (
+      !phone_number ||
+      !password ||
+      is_owner === undefined ||
+      (is_owner === false && !client_name)
+    ) {
+      return res.status(400).json({ error: "Campos incompletos" });
+    }
+
+    const tableName = is_owner ? "owners" : "users";
+
+    // Verificar si el phone_number ya existe
+    db.get(
+      `SELECT * FROM ${tableName} WHERE phone_number = ?`,
+      [phone_number],
+      (err, row) => {
+        if (err) {
+          console.error(
+            "Error al verificar el número de teléfono:",
+            err.message
+          );
+          return res.status(500).json({ error: "Error interno del servidor" });
+        }
+        if (row) {
+          console.log("Usuario con ese número de teléfono ya existe:", row);
+          return res
+            .status(400)
+            .json({ error: "Usuario con ese número de teléfono ya existe" });
+        }
+
+        // Agregar el usuario a la base de datos
+        const sql = is_owner
+          ? `INSERT INTO ${tableName} (phone_number, password, profile_image) VALUES (?, ?, ?)`
+          : `INSERT INTO ${tableName} (phone_number, password, client_name, profile_image) VALUES (?, ?, ?, ?)`;
+
+        const params = is_owner
+          ? [phone_number, password, profile_image]
+          : [phone_number, password, client_name, profile_image];
+
+        console.log("SQL para insertar usuario:", sql);
+        console.log("Parámetros:", params);
+
+        db.run(sql, params, function (err) {
+          if (err) {
+            console.error("Error al insertar el usuario:", err.message);
+            return res
+              .status(500)
+              .json({ error: "Error interno del servidor" });
+          }
+          console.log(`Usuario añadido con ID: ${this.lastID}`);
+          // Éxito al registrar el usuario
+          res.status(201).json({
+            id: this.lastID,
+            phone_number,
+            is_owner,
+            client_name,
+            profile_image,
+          });
+        });
+      }
+    );
+  }
+);
 
 /**
  * @swagger
@@ -464,17 +563,13 @@ app.get("/users", (req, res) => {
     }
   });
 });
-app.get("/users", (req, res) => {
-  db.all("SELECT * FROM users", (err, rows) => {
-    if (err) {
-      console.error(err.message);
-      res.status(500).json({ error: "Error interno del servidor" });
-    } else {
-      res.json(rows);
-    }
-  });
-});
 
+// Asegúrate de que el directorio de 'uploads' existe
+const fs = require("fs");
+const uploadDir = "./uploads";
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir);
+}
 // Iniciar el servidor
 app.listen(port, () => {
   console.log(`Servidor iniciado en http://localhost:${port}`);
