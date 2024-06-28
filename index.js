@@ -9,6 +9,7 @@ const multer = require("multer");
 const path = require("path");
 const app = express();
 const port = 3000;
+//desplegar en linea-> ngrok http http://localhost:3000
 // Configurar CORS
 app.use(cors());
 // Configurar body-parser para manejar solicitudes más grandes
